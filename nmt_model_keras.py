@@ -96,3 +96,221 @@ def load_dataset(source_path,target_path, max_num_examples=30000):
   test_data = [source_words_test,target_words_test_labels]
 
   return train_data,dev_data,test_data,source_lang_dict,target_lang_dict
+
+
+
+
+
+
+class NmtModel(object):
+      
+  def __init__(self,source_dict,target_dict,use_attention):
+        ''' The model initialization function initializes network parameters.
+    Inputs:
+      source_dict (LanguageDict): a LanguageDict object for the source language, Vietnamese.
+      target_dict (LanguageDict): a LanguageDict object for the target language, English.
+      use_attention (bool): if True, use attention.
+    Returns:
+      None.
+    '''
+    # the number of hidden units used by the LSTM
+    self.hidden_size = 200
+    # the size of the word embeddings being used
+    self.embedding_size = 100
+    # the dropout rate for the hidden layers
+    self.hidden_dropout_rate=0.2
+    # the dropout rate for the word embeddings
+    self.embedding_dropout_rate = 0.2
+    # batch size
+    self.batch_size = 100
+
+    # the maximum length of the target sentences
+    self.max_target_step = 30
+
+    # vocab size for source and target; we'll use everything we receive
+    self.vocab_target_size = len(target_dict.vocab)
+    self.vocab_source_size = len(source_dict.vocab)
+
+    # intances of the dictionaries
+    self.target_dict = target_dict
+    self.source_dict = source_dict
+
+    # special tokens to indicate sentence starts and ends.
+    self.SOS = target_dict.word2ids['<start>']
+    self.EOS = target_dict.word2ids['<end>']
+
+    # use attention or no
+    self.use_attention = use_attention
+
+    print("number of tokens in source: %d, number of tokens in target:%d" % (self.vocab_source_size,self.vocab_target_size))
+
+  def build(self):
+        #-------------------------Train Models------------------------------
+    source_words = Input(shape=(None,),dtype='int32')
+    target_words = Input(shape=(None,), dtype='int32')
+
+    """
+    encoder
+
+    """
+    # The train encoder
+    # (a.) Create two randomly initialized embedding lookups, one for the source, another for the target. 
+    print('Task 1(a): Creating the embedding lookups...')
+    embeddings_source = Embedding(self.vocab_source_size,self.embedding_size)
+    embeddings_target = Embedding(self.vocab_target_size,self.embedding_size)
+    
+    # (b.) Look up the embeddings for source words and for target words. Apply dropout to each encoded input
+
+    source_word_embeddings = Dropout(0.3)(embeddings_source(source_words))
+
+    target_words_embeddings = Dropout(0.3)(embeddings_target(target_words))
+
+    # (c.) An encoder LSTM() with return sequences set to True
+
+    encoder_outputs, encoder_state_h, encoder_state_c = LSTM(self.hidden_size,recurrent_dropout=self.hidden_dropout_rate,return_sequences=True,return_state=True)(source_word_embeddings)
+
+    encoder_states = [encoder_state_h,encoder_state_c]
+
+    # The train decoder
+    decoder_lstm = LSTM(self.hidden_size,recurrent_dropout=self.hidden_dropout_rate,return_sequences=True,return_state=True)
+    decoder_outputs_train,_,_ = decoder_lstm(target_words_embeddings,initial_state=encoder_states)
+
+    if self.use_attention:
+      decoder_attention = AttentionLayer()
+      decoder_outputs_train = decoder_attention([encoder_outputs,decoder_outputs_train])
+
+    decoder_dense = Dense(self.vocab_target_size,activation='softmax')
+    decoder_outputs_train = decoder_dense(decoder_outputs_train)
+
+    # compiling the train model.
+    adam = Adam(lr=0.01,clipnorm=5.0)
+    self.train_model = Model([source_words,target_words], decoder_outputs_train)
+    self.train_model.compile(optimizer=adam,loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+
+    # at this point you can print model summary for the train model
+    print('\t\t\t\t\t\t Train Model Summary.')
+    self.train_model.summary()
+
+
+    #-------------------------Inference Models------------------------------
+    # The inference encoder 
+    self.encoder_model = Model(source_words,[encoder_outputs,encoder_state_h,encoder_state_c])
+    # at this point you can print the summary for the encoder model.
+    print('\t\t\t\t\t\t Inference Time Encoder Model Summary.')
+    self.encoder_model.summary()
+
+    # The decoder model
+    # specifying the inputs to the decoder
+    decoder_state_input_h = Input(shape=(self.hidden_size,))
+    decoder_state_input_c = Input(shape=(self.hidden_size,))
+    encoder_outputs_input = Input(shape=(None,self.hidden_size,))
+
+    """
+    decoder for inference
+
+    """
+    # Task 1 (a.) Get the decoded outputs
+    print('\n Putting together the decoder states')
+    # get the inititial states for the decoder, decoder_states
+    # decoder states are the hidden and cell states from the training stage
+    decoder_states = [decoder_state_input_h,decoder_state_input_c]
+    # use decoder states as input to the decoder lstm to get the decoder outputs, h, and c for test time inference
+    decoder_outputs_test,decoder_state_output_h, decoder_state_output_c = decoder_lstm(target_words_embeddings, initial_state=decoder_states)
+
+    # Task 1 (b.) Add attention if attention
+
+
+
+    # Task 1 (c.) pass the decoder_outputs_test (with or without attention) to the decoder dense layer
+    decoder_outputs_test = decoder_dense(decoder_outputs_test)
+
+    # put the model together
+    self.decoder_model = Model([target_words,decoder_state_input_h,decoder_state_input_c,encoder_outputs_input],
+                               [decoder_outputs_test,decoder_state_output_h,decoder_state_output_c])
+    # you can now view the model summary
+    print('\t\t\t\t\t\t Decoder Inference Model summary')
+    print(self.decoder_model.summary())
+
+
+
+  def time_used(self, start_time):
+    curr_time = time.time()
+    used_time = curr_time-start_time
+    m = used_time // 60
+    s = used_time - 60 * m
+    return "%d m %d s" % (m, s)
+
+
+
+  def train(self,train_data,dev_data,test_data, epochs):
+    start_time = time.time()
+    for epoch in range(epochs):
+      print("Starting training epoch {}/{}".format(epoch + 1, epochs))
+      epoch_time = time.time()
+      source_words_train, target_words_train, target_words_train_labels = train_data
+
+      self.train_model.fit([source_words_train,target_words_train],target_words_train_labels,batch_size=self.batch_size)
+
+      print("Time used for epoch {}: {}".format(epoch + 1, self.time_used(epoch_time)))
+      dev_time = time.time()
+      print("Evaluating on dev set after epoch {}/{}:".format(epoch + 1, epochs))
+      self.eval(dev_data)
+      print("Time used for evaluate on dev set: {}".format(self.time_used(dev_time)))
+
+    print("Training finished!")
+    print("Time used for training: {}".format(self.time_used(start_time)))
+
+    print("Evaluating on test set:")
+    test_time = time.time()
+    self.eval(test_data)
+    print("Time used for evaluate on test set: {}".format(self.time_used(test_time)))
+
+
+
+  def get_target_sentences(self, sents,vocab,reference=False):
+    str_sents = []
+    num_sent, max_len = sents.shape
+    for i in range(num_sent):
+      str_sent = []
+      for j in range(max_len):
+        t = sents[i,j].item()
+        if t == self.SOS:
+          continue
+        if t == self.EOS:
+          break
+
+        str_sent.append(vocab[t])
+      if reference:
+        str_sents.append([str_sent])
+      else:
+        str_sents.append(str_sent)
+    return str_sents
+
+
+
+  def eval(self, dataset):
+    # get the source words and target_word_labels for the eval dataset
+    source_words, target_words_labels = dataset
+    vocab = self.target_dict.vocab
+
+    # using the same encoding network used during training time, encode the training
+    encoder_outputs, state_h,state_c = self.encoder_model.predict(source_words,batch_size=self.batch_size)
+    # for max_target_step steps, feed the step target words into the decoder.
+    predictions = []
+    step_target_words = np.ones([source_words.shape[0],1]) * self.SOS
+    for _ in range(self.max_target_step):
+      
+      step_decoder_outputs, state_h,state_c = self.decoder_model.predict([step_target_words,state_h,state_c,encoder_outputs],batch_size=self.batch_size)
+      step_target_words = np.argmax(step_decoder_outputs,axis=2)
+      predictions.append(step_target_words)
+
+    # predictions is a [time_step x batch_size x 1] array. We use get_target_sentence() to recover the batch_size sentences
+    candidates = self.get_target_sentences(np.concatenate(predictions,axis=1),vocab)
+    references = self.get_target_sentences(target_words_labels,vocab,reference=True)
+
+    # score using nltk bleu scorer
+    score = corpus_bleu(references,candidates)
+    print("Model BLEU score: %.2f" % (score*100.0))
+
+
+  
