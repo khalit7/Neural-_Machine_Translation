@@ -1,5 +1,6 @@
 from keras.layers import Embedding,LSTM,Dropout,Dense,Layer
 from keras import Model,Input
+import tensorflow as tf
 from keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.optimizers import Adam
 import keras.backend as K
@@ -100,12 +101,42 @@ def load_dataset(source_path,target_path, max_num_examples=30000):
 
 
 
+class AttentionLayer(Layer):
+  def compute_mask(self, inputs, mask=None):
+    if mask == None:
+      return None
+    return mask[1]
+
+  def compute_output_shape(self, input_shape):
+    return (input_shape[1][0],input_shape[1][1],input_shape[1][2]*2)
+
+
+  def call(self, inputs, mask=None):
+    encoder_outputs, decoder_outputs = inputs
+
+    """
+    Task 3 attention
+    
+    Start
+    """
+    decoder_outputs_transpose = K.permute_dimensions(decoder_outputs,pattern = (0,2,1))
+    luong_score = K.batch_dot(encoder_outputs,decoder_outputs_transpose)
+    luong_score = tf.nn.softmax(luong_score,axis = 1)
+    encoder_vector = tf.math.multiply(tf.expand_dims(encoder_outputs,axis = -2) , tf.expand_dims(luong_score,axis = -1) )
+    encoder_vector = tf.reduce_sum(encoder_vector,axis=1)
+    """
+    End Task 3
+    """
+    # [batch,max_dec,2*emb]
+    new_decoder_outputs = K.concatenate([decoder_outputs, encoder_vector])
+
+    return new_decoder_outputs
+
 
 
 class NmtModel(object):
-      
   def __init__(self,source_dict,target_dict,use_attention):
-        ''' The model initialization function initializes network parameters.
+    ''' The model initialization function initializes network parameters.
     Inputs:
       source_dict (LanguageDict): a LanguageDict object for the source language, Vietnamese.
       target_dict (LanguageDict): a LanguageDict object for the target language, English.
@@ -144,14 +175,17 @@ class NmtModel(object):
 
     print("number of tokens in source: %d, number of tokens in target:%d" % (self.vocab_source_size,self.vocab_target_size))
 
+
+
   def build(self):
-        #-------------------------Train Models------------------------------
+    #-------------------------Train Models------------------------------
     source_words = Input(shape=(None,),dtype='int32')
     target_words = Input(shape=(None,), dtype='int32')
 
     """
-    encoder
-
+    Task 1 encoder
+    
+    Start
     """
     # The train encoder
     # (a.) Create two randomly initialized embedding lookups, one for the source, another for the target. 
@@ -160,15 +194,17 @@ class NmtModel(object):
     embeddings_target = Embedding(self.vocab_target_size,self.embedding_size)
     
     # (b.) Look up the embeddings for source words and for target words. Apply dropout to each encoded input
-
+    print('\nTask 1(b): Looking up source and target words...')
     source_word_embeddings = Dropout(0.3)(embeddings_source(source_words))
 
     target_words_embeddings = Dropout(0.3)(embeddings_target(target_words))
 
     # (c.) An encoder LSTM() with return sequences set to True
-
+    print('\nTask 1(c): Creating an encoder')
     encoder_outputs, encoder_state_h, encoder_state_c = LSTM(self.hidden_size,recurrent_dropout=self.hidden_dropout_rate,return_sequences=True,return_state=True)(source_word_embeddings)
-
+    """
+    End Task 1
+    """
     encoder_states = [encoder_state_h,encoder_state_c]
 
     # The train decoder
@@ -178,6 +214,7 @@ class NmtModel(object):
     if self.use_attention:
       decoder_attention = AttentionLayer()
       decoder_outputs_train = decoder_attention([encoder_outputs,decoder_outputs_train])
+
 
     decoder_dense = Dense(self.vocab_target_size,activation='softmax')
     decoder_outputs_train = decoder_dense(decoder_outputs_train)
@@ -190,7 +227,7 @@ class NmtModel(object):
     # at this point you can print model summary for the train model
     print('\t\t\t\t\t\t Train Model Summary.')
     self.train_model.summary()
-
+    
 
     #-------------------------Inference Models------------------------------
     # The inference encoder 
@@ -206,8 +243,9 @@ class NmtModel(object):
     encoder_outputs_input = Input(shape=(None,self.hidden_size,))
 
     """
-    decoder for inference
-
+    Task 2 decoder for inference
+    
+    Start
     """
     # Task 1 (a.) Get the decoded outputs
     print('\n Putting together the decoder states')
@@ -219,11 +257,14 @@ class NmtModel(object):
 
     # Task 1 (b.) Add attention if attention
 
-
+    if self.use_attention:
+      decoder_outputs_test = decoder_attention([encoder_outputs_input,decoder_outputs_test])
 
     # Task 1 (c.) pass the decoder_outputs_test (with or without attention) to the decoder dense layer
     decoder_outputs_test = decoder_dense(decoder_outputs_test)
-
+    """
+    End Task 2 
+    """
     # put the model together
     self.decoder_model = Model([target_words,decoder_state_input_h,decoder_state_input_c,encoder_outputs_input],
                                [decoder_outputs_test,decoder_state_output_h,decoder_state_output_c])
@@ -311,6 +352,19 @@ class NmtModel(object):
     # score using nltk bleu scorer
     score = corpus_bleu(references,candidates)
     print("Model BLEU score: %.2f" % (score*100.0))
+    
+
+def main(source_path, target_path, use_attention):
+  max_example = 30000
+  print('loading dictionaries')
+  train_data, dev_data, test_data, source_dict, target_dict = load_dataset(source_path,target_path,max_num_examples=max_example)
+  print("read %d/%d/%d train/dev/test batches" % (len(train_data[0]),len(dev_data[0]), len(test_data[0])))
+
+  model = NmtModel(source_dict,target_dict,use_attention)
+  model.build()
+  model.train(train_data,dev_data,test_data,10)
 
 
-  
+source_path = "/content/data.30.vi"
+target_path = "/content/data.30.en"
+main(source_path,target_path,True)
